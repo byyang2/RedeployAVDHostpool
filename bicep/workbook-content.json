@@ -64,7 +64,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let base = AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.AUTOMATION\"\n| where Category in (\"JobStreams\", \"JobLogs\")\n| where RunbookName_s == \"Recreate-AVDSessionHosts\";\nlet phaseRows = base\n| where ResultDescription contains \"] status=\"\n| extend VmName = extract(@\"\\] \\[([^\\]]+)\\] status=\", 1, ResultDescription)\n| extend Phase  = extract(@\"status=(\\w+)\", 1, ResultDescription)\n| extend Detail = trim(@\"\\s+\", extract(@\"status=\\w+\\s*(.*)$\", 1, ResultDescription))\n| where isnotempty(VmName) and isnotempty(Phase)\n| project TimeGenerated, VmName, Phase, Detail;\nlet successRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDCOMPLETED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Completed\", Detail = \"Rebuild completed (terminal marker)\";\nlet failureRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDFAILED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| extend Detail = trim(@\"\\s+\", extract(@\"Reason=(.*)$\", 1, ResultDescription))\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Failed\", Detail;\nunion phaseRows, successRows, failureRows\n| where VmName matches regex strcat(@\"^\", \"{Hostpool}\", @\"-\\d\")\n| summarize arg_max(TimeGenerated, Phase, Detail) by VmName\n| extend ['Time in phase'] = now() - TimeGenerated\n| project VmName, Phase, ['Last update']=TimeGenerated, ['Time in phase'], Detail\n| order by VmName asc",
+        "query": "let base = AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.AUTOMATION\"\n| where Category in (\"JobStreams\", \"JobLogs\")\n| where RunbookName_s == \"Recreate-AVDSessionHosts\";\nlet phaseRows = base\n| where ResultDescription contains \"] status=\"\n| extend VmName = extract(@\"\\] \\[([^\\]]+)\\] status=\", 1, ResultDescription)\n| extend Phase  = extract(@\"status=(\\w+)\", 1, ResultDescription)\n| extend Detail = trim(@\"\\s+\", extract(@\"status=\\w+\\s*(.*)$\", 1, ResultDescription))\n| where isnotempty(VmName) and isnotempty(Phase)\n| project TimeGenerated, VmName, Phase, Detail;\nlet successRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDCOMPLETED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Completed\", Detail = \"Rebuild completed (terminal marker)\";\nlet failureRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDFAILED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| extend Detail = trim(@\"\\s+\", extract(@\"Reason=(.*)$\", 1, ResultDescription))\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Failed\", Detail;\nunion phaseRows, successRows, failureRows\n| where VmName matches regex strcat(@\"^\", \"{Hostpool}\", @\"-\\d\")\n| summarize arg_max(TimeGenerated, Phase, Detail) by VmName\n| extend ['Time in phase'] = iff(Phase in ('Completed', 'Failed'), timespan(null), now() - TimeGenerated)\n| project VmName, Phase, ['Last update']=TimeGenerated, ['Time in phase'], Detail\n| order by VmName asc",
         "size": 1,
         "title": "",
         "noDataMessage": "No runbook activity in this time range.",
@@ -108,7 +108,7 @@
     {
       "type": 1,
       "content": {
-        "json": "### Phase timeline\nHorizontal bars show how long each VM spent in each phase. Color = phase."
+        "json": "### Rebuild duration\nTotal time per VM for the **latest rebuild cycle** (events from the most recent `Capturing` onward). Excludes `Pending`, `Completed`, and `Failed` — so the value is the actual hands-on rebuild work (claim \u2192 register), not queue wait or post-finish idle."
       },
       "name": "header-timeline"
     },
@@ -116,119 +116,27 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let base = AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.AUTOMATION\"\n| where Category in (\"JobStreams\", \"JobLogs\")\n| where RunbookName_s == \"Recreate-AVDSessionHosts\";\nlet phaseRows = base\n| where ResultDescription contains \"] status=\"\n| extend VmName = extract(@\"\\] \\[([^\\]]+)\\] status=\", 1, ResultDescription)\n| extend Phase = extract(@\"status=(\\w+)\", 1, ResultDescription)\n| where isnotempty(VmName) and isnotempty(Phase)\n| project TimeGenerated, VmName, Phase;\nlet successRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDCOMPLETED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Completed\";\nlet failureRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDFAILED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Failed\";\nlet events = union phaseRows, successRows, failureRows\n| where VmName matches regex strcat(@\"^\", \"{Hostpool}\", @\"-\\d\")\n| order by VmName asc, TimeGenerated asc;\nevents\n| serialize\n| extend NextTime = next(TimeGenerated), NextVm = next(VmName)\n| extend EndTime = iff(NextVm == VmName and isnotnull(NextTime), NextTime, now())\n| extend DurationSec = todouble(datetime_diff('second', EndTime, TimeGenerated))\n| where DurationSec > 0\n| project VmName, Phase, DurationSec\n| summarize Seconds = sum(DurationSec) by VmName, Phase\n| evaluate pivot(Phase, sum(Seconds), VmName)\n| order by VmName asc",
+        "query": "let base = AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.AUTOMATION\"\n| where Category in (\"JobStreams\", \"JobLogs\")\n| where RunbookName_s == \"Recreate-AVDSessionHosts\";\nlet phaseRows = base\n| where ResultDescription contains \"] status=\"\n| extend VmName = extract(@\"\\] \\[([^\\]]+)\\] status=\", 1, ResultDescription)\n| extend Phase = extract(@\"status=(\\w+)\", 1, ResultDescription)\n| where isnotempty(VmName) and isnotempty(Phase)\n| project TimeGenerated, VmName, Phase;\nlet successRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDCOMPLETED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Completed\";\nlet failureRows = base\n| where ResultDescription has \"[ALERT-VMREBUILDFAILED]\"\n| extend VmName = extract(@\"VmName=(\\S+)\", 1, ResultDescription)\n| where isnotempty(VmName)\n| project TimeGenerated, VmName, Phase = \"Failed\";\nlet allEvents = union phaseRows, successRows, failureRows\n| where VmName matches regex strcat(@\"^\", \"{Hostpool}\", @\"-\\d\");\nlet lastCapture = allEvents | where Phase == \"Capturing\" | summarize CycleStart = max(TimeGenerated) by VmName;\nallEvents\n| join kind=inner lastCapture on VmName\n| where TimeGenerated >= CycleStart\n| project TimeGenerated, VmName, Phase\n| order by VmName asc, TimeGenerated asc\n| serialize\n| extend NextTime = next(TimeGenerated), NextVm = next(VmName)\n| extend EndTime = iff(NextVm == VmName and isnotnull(NextTime), NextTime, now())\n| extend DurationSec = todouble(datetime_diff('second', EndTime, TimeGenerated))\n| where DurationSec > 0\n| where Phase !in (\"Pending\", \"Completed\", \"Failed\")\n| summarize TotalSec = sum(DurationSec) by VmName\n| extend ['Total time'] = strcat(toint(TotalSec/60), 'm ', toint(TotalSec) % 60, 's')\n| project VmName, ['Total time']\n| order by VmName asc",
         "size": 1,
         "title": "",
-        "noDataMessage": "No phase transitions in this time range.",
+        "noDataMessage": "No rebuild activity in this time range.",
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
-        "visualization": "barchart",
-        "chartSettings": {
-          "xAxis": "VmName",
-          "group": null,
-          "createOtherGroup": null,
-          "showLegend": true,
-          "ySettings": {
-            "numberFormatSettings": {
-              "unit": 24,
-              "options": { "style": "decimal", "useGrouping": true, "maximumFractionDigits": 0 }
-            }
-          },
-          "seriesLabelSettings": [
-            { "seriesName": "Pending",                "color": "gray" },
-            { "seriesName": "Claimed",                "color": "blueDark" },
-            { "seriesName": "Capturing",              "color": "blue" },
-            { "seriesName": "Deleting",               "color": "redDark" },
-            { "seriesName": "Creating",               "color": "purple" },
-            { "seriesName": "DomainJoining",          "color": "purple" },
-            { "seriesName": "RegisteringAvd",         "color": "turquoise" },
-            { "seriesName": "RestoringExtensions",    "color": "turquoise" },
-            { "seriesName": "RestoringDcr",           "color": "turquoise" },
-            { "seriesName": "WaitingForRegistration", "color": "orange" },
-            { "seriesName": "AwaitingUsers",          "color": "yellow" },
-            { "seriesName": "Completed",              "color": "green" },
-            { "seriesName": "Failed",                 "color": "red" }
-          ]
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "VmName",     "formatter": 0 },
+            { "columnMatch": "Total time", "formatter": 1 }
+          ],
+          "labelSettings": [
+            { "columnId": "VmName",     "label": "VM" },
+            { "columnId": "Total time", "label": "Total time" }
+          ],
+          "rowLimit": 200,
+          "filter": true
         }
       },
       "name": "timeline-bars"
-    },
-    {
-      "type": 12,
-      "content": {
-        "version": "NotebookGroup/1.0",
-        "groupType": "editable",
-        "items": [
-          {
-            "type": 1,
-            "content": { "json": "### Throughput & outcomes" },
-            "name": "header-outcomes"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.AUTOMATION\"\n| where Category in (\"JobStreams\", \"JobLogs\")\n| where RunbookName_s == \"Recreate-AVDSessionHosts\"\n| where ResultDescription has \"[ALERT-VMREBUILDCOMPLETED]\"\n| extend Hostpool = extract(@\"Hostpool=(\\S+)\", 1, ResultDescription)\n| extend VmName   = extract(@\"VmName=(\\S+)\",   1, ResultDescription)\n| where Hostpool == \"{Hostpool}\"\n| summarize Rebuilds = dcount(strcat(VmName, format_datetime(TimeGenerated,'yyyyMMddHH'))) by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc",
-              "size": 0,
-              "title": "VMs rebuilt (hourly)",
-              "noDataMessage": "No completed rebuilds in this time range.",
-              "queryType": 0,
-              "resourceType": "microsoft.operationalinsights/workspaces",
-              "visualization": "barchart",
-              "chartSettings": {
-                "showLegend": false,
-                "ySettings": {
-                  "numberFormatSettings": {
-                    "unit": 17,
-                    "options": { "style": "decimal", "useGrouping": true, "maximumFractionDigits": 0 }
-                  }
-                }
-              }
-            },
-            "customWidth": "50",
-            "name": "completed-chart"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.AUTOMATION\"\n| where Category in (\"JobStreams\", \"JobLogs\")\n| where RunbookName_s == \"Recreate-AVDSessionHosts\"\n| where ResultDescription contains \"status=Failed\"\n| extend VmName = extract(@\"\\] \\[([^\\]]+)\\] status=\", 1, ResultDescription)\n| extend Reason = trim(@\"\\s+\", extract(@\"status=Failed\\s*(.*)$\", 1, ResultDescription))\n| where VmName matches regex strcat(@\"^\", \"{Hostpool}\", @\"-\\d\")\n| project ['When']=TimeGenerated, VmName, Reason\n| order by ['When'] desc",
-              "size": 0,
-              "title": "Recent failures",
-              "noDataMessage": "No failures in this time range.",
-              "queryType": 0,
-              "resourceType": "microsoft.operationalinsights/workspaces",
-              "visualization": "table",
-              "gridSettings": {
-                "formatters": [
-                  {
-                    "columnMatch": "When",
-                    "formatter": 6,
-                    "formatOptions": { "showIcon": true }
-                  },
-                  {
-                    "columnMatch": "Reason",
-                    "formatter": 0,
-                    "formatOptions": { "showIcon": true }
-                  }
-                ],
-                "rowLimit": 50,
-                "filter": true
-              }
-            },
-            "customWidth": "50",
-            "name": "failures-grid"
-          }
-        ]
-      },
-      "name": "group-outcomes"
-    },
-    {
-      "type": 1,
-      "content": {
-        "json": "### Legend\n\n| Phase | Meaning |\n| --- | --- |\n| **Pending** | Queued; no worker has picked it up yet. |\n| **Claimed** | A Process job has the lock and will rebuild this VM. |\n| **AwaitingUsers** | Skipped this cycle: live user sessions are still on the host. |\n| **Capturing** | Snapshotting NIC, extensions, DCR association into the snapshot variable. |\n| **Deleting** | Old VM (and OS disk) being removed. |\n| **Creating** | New VM being deployed from the gallery image. |\n| **DomainJoining** | Running the AD domain-join extension. |\n| **RegisteringAvd** | Installing the AVD agent and registering with the host pool. |\n| **RestoringExtensions** | Reapplying captured extensions (AMA, etc.). |\n| **RestoringDcr** | Re-associating Data Collection Rules. |\n| **WaitingForRegistration** | DSC done; polling the host pool for the AVD agent to self-register. |\n| **Completed** | Rebuild finished. Drain mode is ON until Runbook 2 verifies Entra/hybrid join. |\n| **Failed** | Hard error. Will retry automatically after `FailureRetryMinutes`. |\n\n_The expected happy path is roughly: **Pending -> Claimed -> Capturing -> Deleting -> Creating -> DomainJoining -> RegisteringAvd -> RestoringExtensions -> RestoringDcr -> WaitingForRegistration -> Completed**._"
-      },
-      "name": "legend"
     }
   ],
   "fallbackResourceIds": [],
