@@ -1,0 +1,29 @@
+# --- Environment-specific parameter file ---------------------------------
+# Each operator copies main.bicepparam.example -> main.bicepparam locally and
+# fills in their hostpool / image-gallery / alert-email / domain values. The
+# real file never ships in the repo so we don't leak identifying info.
+bicep/main.bicepparam
+
+# --- Build / transient outputs --------------------------------------------
+bicep/*.bicep.json
+bicep/main.json
+
+# --- Editor / OS noise ----------------------------------------------------
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Local secrets / scratch ---------------------------------------------
+*.local.*
+*.secret.*
+*.pem
+*.pfx
+*.key
+.env
+.env.*
+
+# --- PowerShell test/transcript artifacts --------------------------------
+*.log
+TestResults/

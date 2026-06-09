@@ -1,0 +1,52 @@
+// =============================================================================
+//  EXAMPLE parameter file.
+//
+//  First-time setup:
+//      1. Copy this file to main.bicepparam (same directory).
+//      2. Replace every <PLACEHOLDER> below with values for YOUR environment.
+//      3. Run .\Deploy-Automation.ps1 -Mode WhatIf (then -Mode Deploy).
+//
+//  main.bicepparam is gitignored so your real hostpool / domain / email
+//  values are never committed.
+// =============================================================================
+
+using 'main.bicep'
+
+// --- Azure region and Automation Account ---------------------------------
+// Must be a region your AVD hosts already live in (commercial e.g. eastus2,
+// gov e.g. usgovvirginia).
+param location                     = '<AZURE_REGION>'
+param targetResourceGroup          = 'rg-avd-automation'
+param automationAccountName        = 'aa-avd-rebuild'
+
+// --- AVD host pool to be rebuilt -----------------------------------------
+param hostpoolName                 = '<HOSTPOOL_NAME>'
+param hostpoolRG                   = '<HOSTPOOL_RG>'
+
+// Key Vault is auto-created by main.bicep in the Automation Account RG
+// (kv-avd-rebuild-<hash>). After the first deploy, populate two secrets in
+// it - see README "Post-deploy: populate Key Vault secrets".
+
+// --- Compute Gallery (source image) --------------------------------------
+param imageGalleryName             = '<IMAGE_GALLERY_NAME>'
+param imageGalleryRG               = '<IMAGE_GALLERY_RG>'
+param imageDefinitionName          = '<IMAGE_DEFINITION_NAME>'
+param imageVersionName             = 'latest'
+
+// --- Domain join ---------------------------------------------------------
+// For Entra-joined hosts leave domainName blank and the runbook skips the
+// domain-join extension; you still need vmAdminPasswordSecretName populated.
+param domainName                   = '<DOMAIN_FQDN>'              // e.g. contoso.local
+param domainJoinUserName           = '<DOMAIN_JOIN_UPN>'          // e.g. svc-djoin@contoso.local
+param domainJoinPasswordSecretName = 'domainJoinPassword'
+param domainJoinOUPath             = ''                           // optional LDAP DN
+
+// --- Local VM administrator ----------------------------------------------
+param vmAdminName                  = 'azureadmin'
+param vmAdminPasswordSecretName    = 'vmAdminPassword'
+
+// --- Alerting / Log Analytics --------------------------------------------
+// Email that receives an alert whenever a session host VM rebuild FAILS.
+param alertEmailAddress            = '<ALERT_EMAIL>'
+param logAnalyticsWorkspaceName    = 'law-avd-rebuild-alerts'
+param logAnalyticsRetentionDays    = 30
