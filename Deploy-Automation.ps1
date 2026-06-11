@@ -422,6 +422,10 @@ $rebuildBase = @{
     HostpoolName                 = $rebuildHpName
     HostpoolRG                   = $rebuildHpRG
     Location                     = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+location\s*=\s*'([^']+)'").Matches.Groups[1].Value
+    # Subscription pin - bind on every schedule so the scheduled runbook
+    # invocation calls Set-AzContext -SubscriptionId before any Get-Az* probe,
+    # regardless of which sub the MI happens to default to.
+    SubscriptionId               = $paramSubscriptionId
     DomainName                   = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+domainName\s*=\s*'([^']+)'").Matches.Groups[1].Value
     DomainJoinUserName           = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+domainJoinUserName\s*=\s*'([^']+)'").Matches.Groups[1].Value
     DomainJoinPasswordSecretName = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+domainJoinPasswordSecretName\s*=\s*'([^']+)'").Matches.Groups[1].Value
@@ -490,8 +494,9 @@ Register-AvdJobSchedule -RunbookName 'Recreate-AVDSessionHosts' -ScheduleName 's
 Register-AvdJobSchedule -RunbookName 'Recreate-AVDSessionHosts' -ScheduleName 'sched-recreate-weekly-sat' -Parameters ($rebuildBase + @{ Mode = 'Stage' })
 
 Register-AvdJobSchedule -RunbookName 'Disable-DrainForEntraJoined' -ScheduleName 'sched-entra-hourly' -Parameters @{
-    HostpoolName = $rebuildHpName
-    HostpoolRG   = $rebuildHpRG
+    HostpoolName   = $rebuildHpName
+    HostpoolRG     = $rebuildHpRG
+    SubscriptionId = $paramSubscriptionId
 }
 
 # ---- Hourly schedule for Disable-DrainAfterAge: bind, then DISABLE.
@@ -503,8 +508,9 @@ Register-AvdJobSchedule -RunbookName 'Disable-DrainForEntraJoined' -ScheduleName
 # fire until someone explicitly enables it in the portal or via
 # Set-AzAutomationSchedule -IsEnabled $true.
 Register-AvdJobSchedule -RunbookName 'Disable-DrainAfterAge' -ScheduleName 'sched-drainage-hourly' -Parameters @{
-    HostpoolName = $rebuildHpName
-    HostpoolRG   = $rebuildHpRG
+    HostpoolName   = $rebuildHpName
+    HostpoolRG     = $rebuildHpRG
+    SubscriptionId = $paramSubscriptionId
 }
 Write-Host "Disabling schedule sched-drainage-hourly (manual-only by design)..."
 Set-AzAutomationSchedule -ResourceGroupName $ResourceGroup `

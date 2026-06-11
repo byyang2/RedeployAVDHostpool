@@ -49,6 +49,15 @@ param(
     [Parameter(Mandatory)][string] $HostpoolRG,
     [string] $Location     = 'usgovvirginia',
 
+    # ---------- Subscription pin ----------
+    # Pin the Az context to this exact subscription before any Get-Az* call.
+    # Belt-and-suspenders: even though the Automation Account MI has its own
+    # default subscription, a customer's MI could have role assignments in
+    # other subs and Az would pick whichever happens to be the context
+    # default - resolving HostpoolRG / ImageGalleryRG / KeyVaultRG in the
+    # wrong sub. Empty string => keep whatever the MI's default sub is.
+    [string] $SubscriptionId = '',
+
     # ---------- Domain join ----------
     [Parameter(Mandatory)][string] $DomainName,
     [Parameter(Mandatory)][string] $DomainJoinUserName,
@@ -211,7 +220,16 @@ function Connect-AzureAutomation {
     Disable-AzContextAutosave -Scope Process | Out-Null
     $ctx = (Connect-AzAccount -Identity -Environment AzureUSGovernment).Context
     Set-AzContext -Context $ctx | Out-Null
-    Write-Log "Connected as $($ctx.Account.Id) in subscription $($ctx.Subscription.Id)."
+    if ($SubscriptionId) {
+        Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
+        $ctx = Get-AzContext
+        if ($ctx.Subscription.Id -ne $SubscriptionId) {
+            throw "Failed to pin Az context to subscription '$SubscriptionId' (current: '$($ctx.Subscription.Id)'). Confirm the Automation Account's Managed Identity has access to that subscription."
+        }
+        Write-Log "Connected as $($ctx.Account.Id) in subscription $($ctx.Subscription.Id) (pinned)."
+    } else {
+        Write-Log "Connected as $($ctx.Account.Id) in subscription $($ctx.Subscription.Id) (default)."
+    }
 }
 
 function Get-RebuildState {
@@ -611,6 +629,7 @@ function Start-ProcessJob {
         HostpoolName                   = $HostpoolName
         HostpoolRG                     = $HostpoolRG
         Location                       = $Location
+        SubscriptionId                 = $SubscriptionId
         DomainName                     = $DomainName
         DomainJoinUserName             = $DomainJoinUserName
         DomainJoinPasswordSecretName   = $DomainJoinPasswordSecretName
