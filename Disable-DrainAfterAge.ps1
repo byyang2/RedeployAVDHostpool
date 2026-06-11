@@ -159,7 +159,12 @@ foreach ($sh in $sessionHosts) {
             continue
         }
 
-        $stampValue = $nowUtc.ToString('o')
+        # Prefix with non-numeric text so Azure / Az PowerShell does NOT parse the
+        # value back to a DateTime and reformat it in the local culture (which is
+        # what turned 'AVDDrainAutoDisabled=2026-06-11T02:10:36Z' into the
+        # en-US-formatted '06/11/2026 02:10:36' on read-back). Format is fixed
+        # second-precision UTC ISO 8601 - no fractional seconds, no offset wiggle.
+        $stampValue = 'utc@' + $nowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
 
         if ($sh.AllowNewSession) {
             # Drain is already off. Stamp the marker so this runbook never

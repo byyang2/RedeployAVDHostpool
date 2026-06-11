@@ -158,16 +158,39 @@ Set-AzAutomationVariable -ResourceGroupName $rg -AutomationAccountName $aa `
     -Name "AVDRebuildLock_$hp" -Value '' -Encrypted $false | Out-Null
 
 # Manual: drain-off any session host whose VM is older than 2 hours and has
-# not been stamped yet. Idempotent. Stamps the marker tag on each VM it
-# touches so a later run will skip it.
+# not been stamped with the marker tag (AVDDrainAutoDisabled). Idempotent.
+# Once a VM is stamped this runbook will never touch it again - so an
+# operator can manually re-drain it later without this runbook undoing it.
 Start-AzAutomationRunbook -ResourceGroupName $rg -AutomationAccountName $aa `
     -Name 'Disable-DrainAfterAge' -Parameters @{
-        HostpoolName = $hp
-        HostpoolRG   = Get-P 'hostpoolRG'
+        HostpoolName  = $hp
+        HostpoolRG    = Get-P 'hostpoolRG'
         # Optional overrides:
-        # MinAgeHours   = 2
-        # MarkerTagName = 'AVDDrainAutoDisabled'
+        # MinAgeHours   = 2                       # bump the threshold up/down
+        # MarkerTagName = 'AVDDrainAutoDisabled'  # use a different tag name
     }
+
+# Tail the job output (waits until job finishes, then prints all streams)
+$job = Start-AzAutomationRunbook -ResourceGroupName $rg -AutomationAccountName $aa `
+        -Name 'Disable-DrainAfterAge' -Parameters @{
+            HostpoolName = $hp
+            HostpoolRG   = Get-P 'hostpoolRG' }
+do { Start-Sleep 5; $j = Get-AzAutomationJob -ResourceGroupName $rg `
+        -AutomationAccountName $aa -Id $job.JobId } while ($j.Status -in 'Queued','Running','New','Activating')
+Get-AzAutomationJobOutput -ResourceGroupName $rg -AutomationAccountName $aa `
+    -Id $job.JobId -Stream 'Any' | Sort-Object Time | ForEach-Object {
+        $rec = Get-AzAutomationJobOutputRecord -ResourceGroupName $rg `
+            -AutomationAccountName $aa -JobId $job.JobId -Id $_.StreamRecordId
+        # StreamRecord.Value is a hashtable; for plain Write-Output streams
+        # the rendered message lives under the 'value' key (lowercase).
+        if ($rec.Value -is [hashtable] -and $rec.Value.ContainsKey('value')) { $rec.Value['value'] }
+        else { ($rec.Value | Out-String).TrimEnd() }
+    }
+
+# The hourly schedule 'sched-drainage-hourly' is created but disabled.
+# Enable it if you want the runbook to run every hour automatically:
+Set-AzAutomationSchedule -ResourceGroupName $rg -AutomationAccountName $aa `
+    -Name 'sched-drainage-hourly' -IsEnabled $true
 ```
 
 ## State
