@@ -338,8 +338,33 @@ try {
     if ($err -match 'RoleAssignmentUpdateNotPermitted' -or $err -match 'cannot perform an update.*principalId') {
         Write-Host ''
         Write-Host "Bicep deployment failed with RoleAssignmentUpdateNotPermitted." -ForegroundColor Red
-        Write-Host "This means an existing role assignment at one of our target scopes points at a deleted MI from a prior deployment of this solution." -ForegroundColor Red
-        Write-Host "Re-run this script with -RemoveOrphanedRoleAssignments to auto-delete the stale assignments and try again." -ForegroundColor Yellow
+        Write-Host "An existing role assignment at one of our target scopes points at a deleted MI from a prior deployment of this solution." -ForegroundColor Red
+        Write-Host ''
+        if ($collidingAssignmentIds -and $collidingAssignmentIds.Count -gt 0) {
+            Write-Host "The following $($collidingAssignmentIds.Count) role assignment(s) need to be removed before redeploy will succeed:" -ForegroundColor Yellow
+            foreach ($raId in $collidingAssignmentIds) {
+                $existing = $null
+                try {
+                    $scopeOnly = $raId -replace '/providers/Microsoft\.Authorization/roleAssignments/.*$',''
+                    $existing = Get-AzRoleAssignment -Scope $scopeOnly -ErrorAction SilentlyContinue |
+                        Where-Object { $_.RoleAssignmentId -eq $raId } | Select-Object -First 1
+                } catch { }
+                if ($existing) {
+                    Write-Host ("  Role : {0}" -f $existing.RoleDefinitionName) -ForegroundColor Yellow
+                    Write-Host ("  Scope: {0}" -f $existing.Scope) -ForegroundColor Yellow
+                    Write-Host ("  PrincipalId (dead): {0}" -f $existing.ObjectId) -ForegroundColor Yellow
+                    Write-Host ("  Id   : {0}" -f $raId) -ForegroundColor DarkGray
+                } else {
+                    Write-Host ("  Id   : {0}" -f $raId) -ForegroundColor Yellow
+                }
+                Write-Host ''
+            }
+            Write-Host "Auto-fix:  Re-run this script with -RemoveOrphanedRoleAssignments to delete exactly these assignments and retry." -ForegroundColor Yellow
+            Write-Host "Manual fix: Remove-AzRoleAssignment -Scope <scope> -ObjectId <principalId> -RoleDefinitionName '<role>'" -ForegroundColor DarkGray
+        } else {
+            Write-Host "Re-run this script with -RemoveOrphanedRoleAssignments to auto-delete the stale assignments and try again." -ForegroundColor Yellow
+            Write-Host "(WhatIf did not flag any colliding assignments earlier - the conflict may have appeared between WhatIf and Deploy. Inspect the raw ARM error above for the offending assignment ID.)" -ForegroundColor DarkGray
+        }
         Write-Host ''
     }
     throw
