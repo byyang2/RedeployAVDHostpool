@@ -196,9 +196,36 @@ $whatIfArgs = @{
     Name                  = $deployName
 }
 foreach ($k in $paramOverrides.Keys) { $whatIfArgs[$k] = $paramOverrides[$k] }
-Get-AzResourceGroupDeploymentWhatIfResult @whatIfArgs | Out-Host
+$whatIfResult = Get-AzResourceGroupDeploymentWhatIfResult @whatIfArgs
+$whatIfResult | Out-Host
+
+# Extract the EXACT colliding role assignments from the WhatIf result. ARM
+# flags any role-assignment whose principalId would change with ChangeType
+# 'Modify' on a resource of type Microsoft.Authorization/roleAssignments.
+# Those are the only ones our deploy is going to fight with - everything
+# else (unrelated tenant orphans, our own live assignments, role assignments
+# on resources we don't touch) is correctly classified by ARM as 'Create',
+# 'Ignore', or 'NoChange' and we leave them alone.
+function Get-CollidingRoleAssignmentIdsFromWhatIf {
+    param($WhatIfResult)
+    $ids = @()
+    if (-not $WhatIfResult -or -not $WhatIfResult.Changes) { return ,$ids }
+    foreach ($c in $WhatIfResult.Changes) {
+        if ($c.ChangeType -ne 'Modify') { continue }
+        if ($c.ResourceId -notmatch '/providers/Microsoft\.Authorization/roleAssignments/[0-9a-fA-F-]+$') { continue }
+        $ids += $c.ResourceId
+    }
+    return ,$ids
+}
+$collidingAssignmentIds = Get-CollidingRoleAssignmentIdsFromWhatIf -WhatIfResult $whatIfResult
 
 if ($Mode -eq 'WhatIf') {
+    if ($collidingAssignmentIds.Count -gt 0) {
+        Write-Host ''
+        Write-Host "WhatIf detected $($collidingAssignmentIds.Count) role assignment(s) that would FAIL with RoleAssignmentUpdateNotPermitted:" -ForegroundColor Yellow
+        $collidingAssignmentIds | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+        Write-Host "Re-run with -Mode Deploy -RemoveOrphanedRoleAssignments to auto-clean these and proceed." -ForegroundColor Yellow
+    }
     Write-Host ''
     Write-Host 'WhatIf complete - no changes made. Re-run with -Mode Deploy or -Mode Test to apply.' -ForegroundColor Yellow
     return
@@ -206,86 +233,68 @@ if ($Mode -eq 'WhatIf') {
 
 Write-Step "Deploying Automation Account ($deployName)"
 
-# Pre-deploy cleanup #1 (opt-in): orphaned role assignments at scopes our MI
-# needs. When the Automation Account is deleted, its system-assigned MI's
-# principalId disappears, but role assignments at external scopes (KV,
-# hostpool RG, VNet RG, image gallery RG) stay behind referencing the now-
-# dead principal. The bicep modules use guid-stable assignmentNames
-# (principalId can't seed them - BCP120), so on a clean redeploy ARM tries
-# to update the stale assignment's principalId, which it refuses with
-# "RoleAssignmentUpdateNotPermitted".
+# Pre-deploy cleanup #1 (opt-in): role assignments whose principalId would
+# need to change. When the Automation Account is deleted and redeployed
+# under the SAME name, the new MI gets a new principalId but bicep computes
+# the same assignmentName GUID seed (uses the AA's ARM id, which is name-
+# stable). ARM refuses to mutate principalId on an existing role assignment
+# ("RoleAssignmentUpdateNotPermitted"), and the deploy fails.
 #
-# We DO NOT scan by default. Customer tenants routinely accumulate orphans
-# from unrelated, decommissioned workloads (deleted function apps, retired
-# user-assigned MIs, etc.) at the same scopes; those have entirely different
-# assignment GUIDs and cannot collide with our bicep. A blanket abort on any
-# orphan we find produces noisy false-positives that block legitimate
-# deployments. Instead:
-#   * Default: skip the scan entirely. Let bicep run. If a real collision
-#     exists, ARM fails with the precise offending assignment ID in the
-#     error message; the user re-runs with -RemoveOrphanedRoleAssignments.
-#   * -RemoveOrphanedRoleAssignments: scan our target scopes, delete every
-#     dead-principal assignment we find there, then proceed. Live MIs and
-#     cross-tenant B2B principals are left alone.
-function Find-OrphanedRoleAssignments {
-    param([string[]] $Scopes)
-    $orphans = @()
-    foreach ($scope in $Scopes) {
-        if (-not $scope) { continue }
-        $assignments = Get-AzRoleAssignment -Scope $scope -ErrorAction SilentlyContinue |
-            Where-Object { $_.Scope -eq $scope }
-        foreach ($a in $assignments) {
-            # An orphaned MI assignment shows empty DisplayName. Confirm with
-            # a directory lookup so live assignments whose display name simply
-            # hasn't propagated are not flagged.
-            if ([string]::IsNullOrEmpty($a.DisplayName)) {
-                $sp = Get-AzADServicePrincipal -ObjectId $a.ObjectId -ErrorAction SilentlyContinue
-                if (-not $sp) {
-                    $orphans += [pscustomobject]@{
-                        Scope              = $scope
-                        ObjectId           = $a.ObjectId
-                        RoleDefinitionName = $a.RoleDefinitionName
-                    }
-                }
-            }
-        }
-    }
-    return ,$orphans
-}
-
+# We use the WhatIf result to determine the EXACT set of assignments that
+# would collide - this is precise and minimum-impact:
+#   * Renaming the AA (or any first-time deploy) -> WhatIf shows 'Create'
+#     on every role assignment. NOTHING is removed by the switch, because
+#     no collision exists.
+#   * Same-name redeploy after delete -> WhatIf shows 'Modify' on each
+#     stale assignment. ONLY those exact assignment IDs are removed.
+#   * Unrelated tenant orphans (deleted function apps, retired MIs, etc.)
+#     at the same scopes are never touched - WhatIf doesn't flag them
+#     because our bicep doesn't reference them.
+#
+# Default behavior (no switch): skip cleanup. If a collision exists, bicep
+# fails with RoleAssignmentUpdateNotPermitted and we surface a hint pointing
+# to the switch.
 if ($RemoveOrphanedRoleAssignments) {
-    Write-Step "Scanning target scopes for orphaned role assignments (-RemoveOrphanedRoleAssignments set)"
-    $subId = $ctx.Subscription.Id
-    $imgRG = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+imageGalleryRG\s*=\s*'([^']+)'").Matches.Groups[1].Value
-    $existingKv = Get-AzKeyVault -ResourceGroupName $ResourceGroup -ErrorAction SilentlyContinue |
-        Where-Object { $_.VaultName -like 'kv-avd-rebuild-*' } | Select-Object -First 1
-    $scopesToScan = @()
-    if ($hpRG)  { $scopesToScan += "/subscriptions/$subId/resourceGroups/$hpRG" }
-    if ($imgRG) { $scopesToScan += "/subscriptions/$subId/resourceGroups/$imgRG" }
-    if ($discoveredVnetRG -and $discoveredVnetRG -ne $hpRG) {
-        $scopesToScan += "/subscriptions/$subId/resourceGroups/$discoveredVnetRG"
-    }
-    if ($existingKv) { $scopesToScan += $existingKv.ResourceId }
-
-    $orphans = Find-OrphanedRoleAssignments -Scopes $scopesToScan
-    if ($orphans.Count -eq 0) {
-        Write-Host "No orphaned role assignments found at target scopes." -ForegroundColor DarkGray
+    if ($collidingAssignmentIds.Count -eq 0) {
+        Write-Host "No role-assignment collisions detected by WhatIf - nothing to remove." -ForegroundColor DarkGray
     } else {
-        Write-Host "Found $($orphans.Count) orphaned role assignment(s); auto-deleting..." -ForegroundColor Yellow
-        $orphans | Format-Table -AutoSize | Out-Host
-        foreach ($o in $orphans) {
+        Write-Step "Removing $($collidingAssignmentIds.Count) colliding role assignment(s) (-RemoveOrphanedRoleAssignments set)"
+        foreach ($raId in $collidingAssignmentIds) {
+            # Re-fetch by ID so we can show role + principal for the audit
+            # log line and confirm the principal is genuinely dead before
+            # deleting (defense-in-depth - don't blow away an assignment
+            # for a live SP just because WhatIf wanted to update it).
+            $existing = Get-AzRoleAssignment -Scope ($raId -replace '/providers/Microsoft\.Authorization/roleAssignments/.*$','') -ErrorAction SilentlyContinue |
+                Where-Object { $_.RoleAssignmentId -eq $raId } | Select-Object -First 1
+            if (-not $existing) {
+                Write-Host "  Skipped (already gone): $raId" -ForegroundColor DarkGray
+                continue
+            }
+            $isDead = $false
+            if ([string]::IsNullOrEmpty($existing.DisplayName)) {
+                $sp = Get-AzADServicePrincipal -ObjectId $existing.ObjectId -ErrorAction SilentlyContinue
+                if (-not $sp) { $isDead = $true }
+            }
+            if (-not $isDead) {
+                Write-Host ("  Skipped (principal {0} is still live): {1} on {2}" -f $existing.ObjectId, $existing.RoleDefinitionName, $raId) -ForegroundColor DarkGray
+                continue
+            }
             try {
-                Remove-AzRoleAssignment -ObjectId $o.ObjectId -RoleDefinitionName $o.RoleDefinitionName -Scope $o.Scope -ErrorAction Stop | Out-Null
-                Write-Host ("  Removed: {0} on {1}" -f $o.RoleDefinitionName, $o.Scope) -ForegroundColor DarkGray
+                Remove-AzRoleAssignment -InputObject $existing -ErrorAction Stop | Out-Null
+                Write-Host ("  Removed: {0} (principal {1}) at {2}" -f $existing.RoleDefinitionName, $existing.ObjectId, $existing.Scope) -ForegroundColor DarkGray
             } catch {
-                Write-Host ("  Failed to remove orphan {0} at {1}: {2}" -f $o.ObjectId, $o.Scope, $_.Exception.Message) -ForegroundColor Red
-                throw "Aborting: could not auto-remove orphaned role assignment. Resolve manually and re-run."
+                Write-Host ("  Failed to remove {0}: {1}" -f $raId, $_.Exception.Message) -ForegroundColor Red
+                throw "Aborting: could not auto-remove colliding role assignment. Resolve manually and re-run."
             }
         }
-        Write-Host "Orphan cleanup complete; continuing deployment." -ForegroundColor Green
+        Write-Host "Collision cleanup complete; continuing deployment." -ForegroundColor Green
     }
 } else {
-    Write-Host "Skipping orphaned role-assignment scan (pass -RemoveOrphanedRoleAssignments if a prior bicep deploy failed with RoleAssignmentUpdateNotPermitted)." -ForegroundColor DarkGray
+    if ($collidingAssignmentIds.Count -gt 0) {
+        Write-Host "WhatIf detected $($collidingAssignmentIds.Count) colliding role assignment(s) - bicep will likely fail. Re-run with -RemoveOrphanedRoleAssignments to auto-clean." -ForegroundColor Yellow
+    } else {
+        Write-Host "No role-assignment collisions detected by WhatIf - skipping cleanup." -ForegroundColor DarkGray
+    }
 }
 
 # Pre-deploy cleanup: the hourly retry schedule's startTime is recomputed
