@@ -41,7 +41,14 @@ param(
     [string] $RebuildRunbook   = (Join-Path $PSScriptRoot 'Recreate-AVDSessionHosts.ps1'),
     [string] $EntraRunbook     = (Join-Path $PSScriptRoot 'Disable-DrainForEntraJoined.ps1'),
     [string] $DrainAgeRunbook  = (Join-Path $PSScriptRoot 'Disable-DrainAfterAge.ps1'),
-    [int]    $TestTimeoutMin   = 15
+    [int]    $TestTimeoutMin   = 15,
+    # When set, orphaned role assignments (ServicePrincipal entries at the KV /
+    # hostpool RG / VNet RG / image gallery RG scopes whose principalId no
+    # longer resolves in AAD) are auto-deleted instead of causing the script
+    # to abort with copy-paste cleanup commands. Use this on redeploys after
+    # the Automation Account was deleted and recreated, where the leftover
+    # assignments are known-safe to remove (they point at a dead MI).
+    [switch] $RemoveOrphanedRoleAssignments
 )
 
 $ErrorActionPreference = 'Stop'
@@ -199,18 +206,27 @@ if ($Mode -eq 'WhatIf') {
 
 Write-Step "Deploying Automation Account ($deployName)"
 
-# Pre-deploy cleanup #1: orphaned role assignments at scopes our MI needs.
-# When the Automation Account is deleted, its system-assigned MI's principalId
-# disappears, but role assignments at external scopes (KV, hostpool RG, VNet
-# RG, image gallery RG) stay behind referencing the now-dead principal. The
-# bicep modules use a guid-stable assignmentName (principalId can't seed it -
-# BCP120), so on a clean redeploy ARM tries to update the stale assignment's
-# principalId, which it refuses ("RoleAssignmentUpdateNotPermitted"). We
-# DETECT orphaned (principal no longer resolves) ServicePrincipal assignments
-# at those scopes and fail fast with copy-paste cleanup commands rather than
-# silently deleting them - the operator should confirm each removal because
-# in rare cases (cross-tenant B2B SPs) an "unresolved" principal can still be
-# valid in its home tenant.
+# Pre-deploy cleanup #1 (opt-in): orphaned role assignments at scopes our MI
+# needs. When the Automation Account is deleted, its system-assigned MI's
+# principalId disappears, but role assignments at external scopes (KV,
+# hostpool RG, VNet RG, image gallery RG) stay behind referencing the now-
+# dead principal. The bicep modules use guid-stable assignmentNames
+# (principalId can't seed them - BCP120), so on a clean redeploy ARM tries
+# to update the stale assignment's principalId, which it refuses with
+# "RoleAssignmentUpdateNotPermitted".
+#
+# We DO NOT scan by default. Customer tenants routinely accumulate orphans
+# from unrelated, decommissioned workloads (deleted function apps, retired
+# user-assigned MIs, etc.) at the same scopes; those have entirely different
+# assignment GUIDs and cannot collide with our bicep. A blanket abort on any
+# orphan we find produces noisy false-positives that block legitimate
+# deployments. Instead:
+#   * Default: skip the scan entirely. Let bicep run. If a real collision
+#     exists, ARM fails with the precise offending assignment ID in the
+#     error message; the user re-runs with -RemoveOrphanedRoleAssignments.
+#   * -RemoveOrphanedRoleAssignments: scan our target scopes, delete every
+#     dead-principal assignment we find there, then proceed. Live MIs and
+#     cross-tenant B2B principals are left alone.
 function Find-OrphanedRoleAssignments {
     param([string[]] $Scopes)
     $orphans = @()
@@ -226,8 +242,8 @@ function Find-OrphanedRoleAssignments {
                 $sp = Get-AzADServicePrincipal -ObjectId $a.ObjectId -ErrorAction SilentlyContinue
                 if (-not $sp) {
                     $orphans += [pscustomobject]@{
-                        Scope            = $scope
-                        ObjectId         = $a.ObjectId
+                        Scope              = $scope
+                        ObjectId           = $a.ObjectId
                         RoleDefinitionName = $a.RoleDefinitionName
                     }
                 }
@@ -237,39 +253,39 @@ function Find-OrphanedRoleAssignments {
     return ,$orphans
 }
 
-Write-Step "Scanning for orphaned role assignments from prior deployments"
-$subId = $ctx.Subscription.Id
-$imgRG  = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+imageGalleryRG\s*=\s*'([^']+)'").Matches.Groups[1].Value
-# Key Vault is co-located with the Automation Account; scope-scan only when an
-# existing vault is already there (i.e. we are redeploying into a populated RG).
-$existingKv = Get-AzKeyVault -ResourceGroupName $ResourceGroup -ErrorAction SilentlyContinue |
-    Where-Object { $_.VaultName -like 'kv-avd-rebuild-*' } | Select-Object -First 1
-$scopesToScan = @()
-if ($hpRG)  { $scopesToScan += "/subscriptions/$subId/resourceGroups/$hpRG" }
-if ($imgRG) { $scopesToScan += "/subscriptions/$subId/resourceGroups/$imgRG" }
-if ($discoveredVnetRG -and $discoveredVnetRG -ne $hpRG) {
-    $scopesToScan += "/subscriptions/$subId/resourceGroups/$discoveredVnetRG"
-}
-if ($existingKv) {
-    $scopesToScan += $existingKv.ResourceId
-}
-$orphans = Find-OrphanedRoleAssignments -Scopes $scopesToScan
-if ($orphans.Count -gt 0) {
-    Write-Host ''
-    Write-Host "ERROR: Found $($orphans.Count) orphaned role assignment(s) at scopes this deployment will reuse." -ForegroundColor Red
-    Write-Host "These reference principal IDs that no longer exist in AAD (typically a deleted Automation Account's MI)." -ForegroundColor Red
-    Write-Host "Bicep will fail with 'RoleAssignmentUpdateNotPermitted' if these are not removed first." -ForegroundColor Red
-    Write-Host ''
-    Write-Host "Orphaned assignments:" -ForegroundColor Yellow
-    $orphans | Format-Table -AutoSize | Out-Host
-    Write-Host "To clean up, review each assignment then run:" -ForegroundColor Yellow
-    Write-Host ''
-    foreach ($o in $orphans) {
-        Write-Host ("  Remove-AzRoleAssignment -ObjectId '{0}' -RoleDefinitionName '{1}' -Scope '{2}'" -f $o.ObjectId, $o.RoleDefinitionName, $o.Scope) -ForegroundColor Cyan
+if ($RemoveOrphanedRoleAssignments) {
+    Write-Step "Scanning target scopes for orphaned role assignments (-RemoveOrphanedRoleAssignments set)"
+    $subId = $ctx.Subscription.Id
+    $imgRG = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+imageGalleryRG\s*=\s*'([^']+)'").Matches.Groups[1].Value
+    $existingKv = Get-AzKeyVault -ResourceGroupName $ResourceGroup -ErrorAction SilentlyContinue |
+        Where-Object { $_.VaultName -like 'kv-avd-rebuild-*' } | Select-Object -First 1
+    $scopesToScan = @()
+    if ($hpRG)  { $scopesToScan += "/subscriptions/$subId/resourceGroups/$hpRG" }
+    if ($imgRG) { $scopesToScan += "/subscriptions/$subId/resourceGroups/$imgRG" }
+    if ($discoveredVnetRG -and $discoveredVnetRG -ne $hpRG) {
+        $scopesToScan += "/subscriptions/$subId/resourceGroups/$discoveredVnetRG"
     }
-    Write-Host ''
-    Write-Host "After cleanup, re-run this script." -ForegroundColor Yellow
-    throw "Aborting deployment: orphaned role assignments must be removed first."
+    if ($existingKv) { $scopesToScan += $existingKv.ResourceId }
+
+    $orphans = Find-OrphanedRoleAssignments -Scopes $scopesToScan
+    if ($orphans.Count -eq 0) {
+        Write-Host "No orphaned role assignments found at target scopes." -ForegroundColor DarkGray
+    } else {
+        Write-Host "Found $($orphans.Count) orphaned role assignment(s); auto-deleting..." -ForegroundColor Yellow
+        $orphans | Format-Table -AutoSize | Out-Host
+        foreach ($o in $orphans) {
+            try {
+                Remove-AzRoleAssignment -ObjectId $o.ObjectId -RoleDefinitionName $o.RoleDefinitionName -Scope $o.Scope -ErrorAction Stop | Out-Null
+                Write-Host ("  Removed: {0} on {1}" -f $o.RoleDefinitionName, $o.Scope) -ForegroundColor DarkGray
+            } catch {
+                Write-Host ("  Failed to remove orphan {0} at {1}: {2}" -f $o.ObjectId, $o.Scope, $_.Exception.Message) -ForegroundColor Red
+                throw "Aborting: could not auto-remove orphaned role assignment. Resolve manually and re-run."
+            }
+        }
+        Write-Host "Orphan cleanup complete; continuing deployment." -ForegroundColor Green
+    }
+} else {
+    Write-Host "Skipping orphaned role-assignment scan (pass -RemoveOrphanedRoleAssignments if a prior bicep deploy failed with RoleAssignmentUpdateNotPermitted)." -ForegroundColor DarkGray
 }
 
 # Pre-deploy cleanup: the hourly retry schedule's startTime is recomputed
@@ -295,13 +311,30 @@ if ($existingHourly) {
     Write-Host "Removed existing sched-recreate-retry-hourly (will be recreated by bicep with fresh :30 startTime)."
 }
 
-$deployment = New-AzResourceGroupDeployment -ResourceGroupName $ResourceGroup `
-    -Name $deployName `
-    -TemplateFile $BicepFile `
-    -TemplateParameterFile $BicepParamFile `
-    -Mode Incremental `
-    @paramOverrides `
-    -Verbose
+$deployment = $null
+try {
+    $deployment = New-AzResourceGroupDeployment -ResourceGroupName $ResourceGroup `
+        -Name $deployName `
+        -TemplateFile $BicepFile `
+        -TemplateParameterFile $BicepParamFile `
+        -Mode Incremental `
+        @paramOverrides `
+        -Verbose `
+        -ErrorAction Stop
+} catch {
+    $err = $_.Exception.Message
+    # Surface the most common redeploy failure (stale role assignment pointing
+    # at a deleted MI) with a precise next-step hint, rather than letting the
+    # raw ARM error scroll off-screen.
+    if ($err -match 'RoleAssignmentUpdateNotPermitted' -or $err -match 'cannot perform an update.*principalId') {
+        Write-Host ''
+        Write-Host "Bicep deployment failed with RoleAssignmentUpdateNotPermitted." -ForegroundColor Red
+        Write-Host "This means an existing role assignment at one of our target scopes points at a deleted MI from a prior deployment of this solution." -ForegroundColor Red
+        Write-Host "Re-run this script with -RemoveOrphanedRoleAssignments to auto-delete the stale assignments and try again." -ForegroundColor Yellow
+        Write-Host ''
+    }
+    throw
+}
 
 $aaName = $deployment.Outputs.automationAccountName.Value
 Write-Host "Automation Account: $aaName"
