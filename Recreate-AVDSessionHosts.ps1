@@ -924,6 +924,18 @@ function New-SessionHostVm {
             foreach ($p in $Snapshot.Tags.PSObject.Properties) { $mergedTags[$p.Name] = "$($p.Value)" }
         }
     }
+    # The new VM is a brand-new install and starts with drain ON. Strip any
+    # drain-related marker carried over from the snapshot so the companion
+    # Disable-DrainAfterAge runbook will (after the age threshold) re-evaluate
+    # this host, disable drain once, and re-stamp the tag. Without this purge
+    # the marker tag survives the rebuild and DrainAfterAge skips the VM
+    # forever (treating it as "already handled").
+    foreach ($staleTag in @('AVDDrainAutoDisabled')) {
+        if ($mergedTags.ContainsKey($staleTag)) {
+            Write-Log "[$vmName] clearing stale tag '$staleTag' from snapshot so post-rebuild runbooks can re-evaluate."
+            $mergedTags.Remove($staleTag) | Out-Null
+        }
+    }
     $mergedTags['AVDLastRebuildUtc'] = $rebuildTimestamp
     $vmBody.tags = $mergedTags
     if ($Snapshot.Zones) {
