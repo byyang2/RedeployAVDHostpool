@@ -22,10 +22,10 @@
               for it to finish.
 
 .EXAMPLE
-    .\Deploy-Automation.ps1 -ResourceGroup rg-avd-automation -Mode WhatIf
+    .\Deploy-Automation.ps1 -Mode WhatIf
 
 .EXAMPLE
-    .\Deploy-Automation.ps1 -ResourceGroup rg-avd-automation -Mode Test
+    .\Deploy-Automation.ps1 -Mode Test
 #>
 
 [CmdletBinding()]
@@ -154,9 +154,11 @@ Write-Host "Account      : $($ctx.Account.Id)"
 
 if (-not (Get-AzResourceGroup -Name $ResourceGroup -ErrorAction SilentlyContinue)) {
     Write-Step "Creating resource group $ResourceGroup"
-    # Read location from bicepparam so the RG matches the AVD region.
+    # Read location from bicepparam so the RG matches the AVD region. No fallback:
+    # the bicep template requires this param, so silently defaulting could create
+    # the RG in the wrong region (e.g. usgovvirginia for a commercial customer).
     $loc = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+location\s*=\s*'([^']+)'").Matches.Groups[1].Value
-    if (-not $loc) { $loc = 'usgovvirginia' }
+    if (-not $loc) { throw "Could not parse 'location' from $BicepParamFile. Add a 'param location = ''<region>''' line and re-run." }
     New-AzResourceGroup -Name $ResourceGroup -Location $loc -Tag @{ workload = 'AVD-Rebuild-Automation' } | Out-Null
 }
 
@@ -209,11 +211,22 @@ $whatIfResult | Out-Host
 function Get-CollidingRoleAssignmentIdsFromWhatIf {
     param($WhatIfResult)
     $ids = @()
-    if (-not $WhatIfResult -or -not $WhatIfResult.Changes) { return ,$ids }
-    foreach ($c in $WhatIfResult.Changes) {
-        if ($c.ChangeType -ne 'Modify') { continue }
-        if ($c.ResourceId -notmatch '/providers/Microsoft\.Authorization/roleAssignments/[0-9a-fA-F-]+$') { continue }
-        $ids += $c.ResourceId
+    if (-not $WhatIfResult) { return ,$ids }
+    # Tolerate property-name drift across Az.Resources versions and strict-mode
+    # by using PSObject reflection instead of dotted access.
+    $changesProp = $WhatIfResult.PSObject.Properties['Changes']
+    if (-not $changesProp -or -not $changesProp.Value) { return ,$ids }
+    foreach ($c in $changesProp.Value) {
+        $ctProp  = $c.PSObject.Properties['ChangeType']
+        $ridProp = $c.PSObject.Properties['ResourceId']
+        if (-not $ridProp) { $ridProp = $c.PSObject.Properties['FullyQualifiedResourceId'] }
+        if (-not $ridProp) { $ridProp = $c.PSObject.Properties['resourceId'] }
+        if (-not $ctProp -or -not $ridProp) { continue }
+        $ct  = [string]$ctProp.Value
+        $rid = [string]$ridProp.Value
+        if ($ct -ne 'Modify') { continue }
+        if ($rid -notmatch '/providers/Microsoft\.Authorization/roleAssignments/[0-9a-fA-F-]+$') { continue }
+        $ids += $rid
     }
     return ,$ids
 }
@@ -302,7 +315,12 @@ if ($RemoveOrphanedRoleAssignments) {
 # updates on a schedule that has already been triggered, so we delete it first
 # and let Bicep recreate it with the freshly computed :30 mark.
 $existingAaName = (Select-String -Path $BicepParamFile -Pattern "^\s*param\s+automationAccountName\s*=\s*'([^']+)'").Matches.Groups[1].Value
-if (-not $existingAaName) { $existingAaName = 'aa-avd-rebuild' }
+if (-not $existingAaName) {
+    # No fallback: a stale-schedule cleanup targeting the WRONG Automation
+    # Account could silently delete a schedule from someone else's AA in the
+    # same RG. Make the operator fix the bicepparam instead.
+    throw "Could not parse 'automationAccountName' from $BicepParamFile. Add a 'param automationAccountName = ''<name>''' line and re-run."
+}
 $existingHourly = Get-AzAutomationSchedule -ResourceGroupName $ResourceGroup `
     -AutomationAccountName $existingAaName `
     -Name 'sched-recreate-retry-hourly' -ErrorAction SilentlyContinue

@@ -47,7 +47,12 @@ param(
     # ---------- Host pool ----------
     [Parameter(Mandatory)][string] $HostpoolName,
     [Parameter(Mandatory)][string] $HostpoolRG,
-    [string] $Location     = 'usgovvirginia',
+    # Region used only when starting Process child jobs and when the snapshot
+    # path doesn't already supply a location. VM placement always uses
+    # $Snapshot.Location from the source VM, so this is just a fallback. Left
+    # empty so the runbook stays region-neutral; the bicep schedule binding
+    # passes the right value at job-start time.
+    [string] $Location     = '',
 
     # ---------- Subscription pin ----------
     # Pin the Az context to this exact subscription before any Get-Az* call.

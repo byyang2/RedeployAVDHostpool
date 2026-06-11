@@ -32,10 +32,10 @@ before re-enabling user connections.
 
 ```powershell
 # Preview only
-.\Deploy-Automation.ps1 -ResourceGroup rg-avd-automation -Mode WhatIf
+.\Deploy-Automation.ps1 -Mode WhatIf
 
 # Deploy + import + publish both runbooks
-.\Deploy-Automation.ps1 -ResourceGroup rg-avd-automation -Mode Deploy
+.\Deploy-Automation.ps1 -Mode Deploy
 ```
 
 No tenant-scoped permissions required. Runbook 2 verifies Entra join state
@@ -102,7 +102,13 @@ secrets in it. After the first deploy, set the two passwords the rebuild
 runbook needs:
 
 ```powershell
-$kv = (Get-AzKeyVault -ResourceGroupName 'rg-avd-automation' |
+# Resolve the AA's resource group from bicep/main.bicepparam so this snippet
+# works regardless of what you named it.
+$pf = '.\bicep\main.bicepparam'
+function Get-P($n) { (Select-String -Path $pf -Pattern "^\s*param\s+$n\s*=\s*'([^']+)'").Matches.Groups[1].Value }
+$rg = Get-P 'targetResourceGroup'
+
+$kv = (Get-AzKeyVault -ResourceGroupName $rg |
         Where-Object VaultName -like 'kv-avd-rebuild-*').VaultName
 Set-AzKeyVaultSecret -VaultName $kv -Name 'domainJoinPassword' -SecretValue (Read-Host -AsSecureString)
 Set-AzKeyVaultSecret -VaultName $kv -Name 'vmAdminPassword'    -SecretValue (Read-Host -AsSecureString)
@@ -114,9 +120,12 @@ missing at the end of a deploy.
 ## Operator commands
 
 ```powershell
-$rg='rg-avd-automation'; $aa='aa-avd-rebuild'
+# Read every value from bicep/main.bicepparam so these commands keep working
+# even if you rename the Automation Account, the RG, the host pool, etc.
 $pf = '.\bicep\main.bicepparam'
 function Get-P($n) { (Select-String -Path $pf -Pattern "^\s*param\s+$n\s*=\s*'([^']+)'").Matches.Groups[1].Value }
+$rg = Get-P 'targetResourceGroup'
+$aa = Get-P 'automationAccountName'
 $hp = Get-P 'hostpoolName'
 
 # Live state
