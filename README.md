@@ -9,6 +9,7 @@ before re-enabling user connections.
 | --- | --- |
 | [Recreate-AVDSessionHosts.ps1](Recreate-AVDSessionHosts.ps1) | Drains, snapshots, deletes, and rebuilds each session host. Re-joins the domain, re-registers with the host pool, re-applies extensions and DCRs. Leaves drain mode ON. |
 | [Disable-DrainForEntraJoined.ps1](Disable-DrainForEntraJoined.ps1) | After rebuild, verifies the device is hybrid/Entra-joined and turns drain mode OFF. **Only acts on VMs Runbook 1 marked `Completed`** — operator-set drain on other hosts is left alone. |
+| [Disable-DrainAfterAge.ps1](Disable-DrainAfterAge.ps1) | **Manual / no schedule.** Time-based fallback: turns drain OFF on session hosts whose VM is older than `-MinAgeHours` (default 2h), then stamps a marker tag (`AVDDrainAutoDisabled`) on the VM so this runbook never touches it again — even if an operator later re-drains it. |
 
 ## What to expect
 
@@ -155,6 +156,18 @@ Start-AzAutomationRunbook -ResourceGroupName $rg -AutomationAccountName $aa `
 # Break a stuck lock (only if you've verified no job is running)
 Set-AzAutomationVariable -ResourceGroupName $rg -AutomationAccountName $aa `
     -Name "AVDRebuildLock_$hp" -Value '' -Encrypted $false | Out-Null
+
+# Manual: drain-off any session host whose VM is older than 2 hours and has
+# not been stamped yet. Idempotent. Stamps the marker tag on each VM it
+# touches so a later run will skip it.
+Start-AzAutomationRunbook -ResourceGroupName $rg -AutomationAccountName $aa `
+    -Name 'Disable-DrainAfterAge' -Parameters @{
+        HostpoolName = $hp
+        HostpoolRG   = Get-P 'hostpoolRG'
+        # Optional overrides:
+        # MinAgeHours   = 2
+        # MarkerTagName = 'AVDDrainAutoDisabled'
+    }
 ```
 
 ## State

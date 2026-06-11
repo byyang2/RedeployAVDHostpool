@@ -7,6 +7,7 @@
 //
 //      * Recreate-AVDSessionHosts.ps1
 //      * Disable-DrainForEntraJoined.ps1
+//      * Disable-DrainAfterAge.ps1  (manual / ad-hoc - no schedule)
 //
 //  Runbook content itself is uploaded after deployment by Deploy-Automation.ps1
 //  (Import-AzAutomationRunbook).  The Bicep template intentionally does not
@@ -181,6 +182,22 @@ resource rbEntra 'Microsoft.Automation/automationAccounts/runbooks@2023-11-01' =
     logProgress: false
     logVerbose:  false
     description: 'Turns off drain mode on rebuilt session hosts once they appear in Entra ID with an accepted trust type.'
+  }
+}
+
+// Manual / ad-hoc runbook. INTENTIONALLY no schedule - operator runs this
+// from the portal or Start-AzAutomationRunbook when they want a time-based
+// fallback (drain off after VM is N hours old, then never touch the VM
+// again because of a marker tag).
+resource rbDrainAge 'Microsoft.Automation/automationAccounts/runbooks@2023-11-01' = {
+  parent: automationAccount
+  name:   'Disable-DrainAfterAge'
+  location: location
+  properties: {
+    runbookType: 'PowerShell72'
+    logProgress: false
+    logVerbose:  false
+    description: 'Manual: turns drain off on session hosts whose VM is older than the threshold, stamps a marker tag so the VM is never touched again.'
   }
 }
 

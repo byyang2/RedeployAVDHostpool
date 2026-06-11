@@ -40,6 +40,7 @@ param(
     [string] $BicepParamFile   = (Join-Path $PSScriptRoot 'bicep\main.bicepparam'),
     [string] $RebuildRunbook   = (Join-Path $PSScriptRoot 'Recreate-AVDSessionHosts.ps1'),
     [string] $EntraRunbook     = (Join-Path $PSScriptRoot 'Disable-DrainForEntraJoined.ps1'),
+    [string] $DrainAgeRunbook  = (Join-Path $PSScriptRoot 'Disable-DrainAfterAge.ps1'),
     [int]    $TestTimeoutMin   = 15
 )
 
@@ -321,6 +322,7 @@ function Import-Runbook {
 
 Import-Runbook -Name 'Recreate-AVDSessionHosts'    -Path $RebuildRunbook -Description 'Recreates AVD session host VMs.'
 Import-Runbook -Name 'Disable-DrainForEntraJoined' -Path $EntraRunbook   -Description 'Turns drain off for Entra-joined hosts.'
+Import-Runbook -Name 'Disable-DrainAfterAge'       -Path $DrainAgeRunbook -Description 'Manual: turns drain off on session hosts older than threshold; tags VM to prevent re-action.'
 
 # ---------------------------------------------------------------- job schedules
 #
