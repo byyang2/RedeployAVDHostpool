@@ -19,6 +19,9 @@ targetScope = 'resourceGroup'
 
 // ----------------------------------------------------------------- parameters
 
+@description('Subscription this template MUST be deployed into. Declared so main.bicepparam can record the intended target sub and Deploy-Automation.ps1 can switch the Az context to it before running anything that resolves resources. Customers commonly have many subscriptions; this guard prevents an accidental deploy into the wrong one.')
+param subscriptionId string
+
 @description('Azure region for the Automation Account (must match the AVD environment, e.g. usgovvirginia).')
 param location string = resourceGroup().location
 
@@ -272,6 +275,23 @@ resource schedEntra 'Microsoft.Automation/automationAccounts/schedules@2023-11-0
   }
 }
 
+// Hourly schedule for Disable-DrainAfterAge. Created here so it shows up
+// in the portal and an operator can flip it on with a single click, but
+// Deploy-Automation.ps1 immediately disables the schedule after binding
+// (the ARM Schedules API has no isEnabled property on create) so this
+// runbook stays manual unless someone explicitly turns the schedule on.
+resource schedDrainAge 'Microsoft.Automation/automationAccounts/schedules@2023-11-01' = {
+  parent: automationAccount
+  name:   'sched-drainage-hourly'
+  properties: {
+    description: 'Hourly trigger for Disable-DrainAfterAge. Created DISABLED. Enable manually to allow time-based drain-off as a fallback.'
+    startTime:   dateTimeAdd(deploymentTimeUtc, 'PT15M')
+    frequency:   'Hour'
+    interval:    1
+    timeZone:    'Etc/UTC'
+  }
+}
+
 // ----------------------------------------------------- runbook parameter map
 // Job schedule resources are intentionally created from PowerShell after the
 // runbooks have been published.  ARM rejects jobSchedules whose target runbook
@@ -280,6 +300,7 @@ resource schedEntra 'Microsoft.Automation/automationAccounts/schedules@2023-11-0
 output retryScheduleName   string = schedRetry.name
 output weeklyScheduleName  string = schedWeekly.name
 output entraScheduleName   string = schedEntra.name
+output drainAgeScheduleName string = schedDrainAge.name
 output rebuildRunbookName  string = rbRecreate.name
 output entraRunbookName    string = rbEntra.name
 
@@ -573,3 +594,7 @@ output managedIdentityPrincipal string = automationAccount.identity.principalId
 output stateVariableName        string = 'AVDRebuildState_${hostpoolName}'
 output runbookNames             array  = [ rbRecreate.name, rbEntra.name ]
 output targetResourceGroup      string = targetResourceGroup
+// Echo the target subscription back so every deployment record shows the
+// sub that was approved in main.bicepparam (the PowerShell wrapper compares
+// it against the live Az context before submitting the deployment).
+output deployedToSubscriptionId string = subscriptionId

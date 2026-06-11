@@ -107,10 +107,38 @@ $ctx = Get-AzContext -ErrorAction SilentlyContinue
 if (-not $ctx -or $ctx.Environment.Name -ne $Environment) {
     Connect-AzAccount -Environment $Environment | Out-Null
 }
-if ($Subscription) {
-    Set-AzContext -Subscription $Subscription | Out-Null
+
+# Subscription guard.
+#
+# main.bicepparam carries 'subscriptionId' as the SOURCE OF TRUTH for which
+# subscription this solution is approved to deploy into. Many customers run
+# multiple subs in one tenant and the bicep template is RG-scoped (so ARM
+# itself will not error if you point it at the wrong sub - it would just
+# happily build everything in the wrong place). We therefore:
+#   1. Read subscriptionId from the bicepparam file.
+#   2. If the operator also passed -Subscription, require it to MATCH;
+#      otherwise abort with a clear error rather than silently overriding
+#      the file.
+#   3. Set the Az context to that sub BEFORE any Get-Az* call so every
+#      pre-deploy probe (orphan-role scan, NIC discovery, KV existence
+#      check) runs against the right sub.
+#   4. Re-read the context and verify the active sub matches.
+$paramSubscriptionId = Get-BicepParamValue -File $BicepParamFile -Name 'subscriptionId'
+if (-not $paramSubscriptionId) {
+    throw "main.bicepparam is missing 'subscriptionId'. Add the line ""param subscriptionId = '<sub-guid>'"" near the top so this script can guard against deploying into the wrong subscription."
 }
+if ($paramSubscriptionId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+    throw "subscriptionId in $BicepParamFile is not a valid GUID: '$paramSubscriptionId'."
+}
+if ($Subscription -and $Subscription -ne $paramSubscriptionId) {
+    throw "Subscription mismatch: -Subscription '$Subscription' was passed, but $BicepParamFile pins subscriptionId='$paramSubscriptionId'. Either drop the -Subscription argument (it is redundant) or update the bicepparam file. Refusing to deploy into the wrong subscription."
+}
+Write-Host "Subscription pinned by main.bicepparam: $paramSubscriptionId"
+Set-AzContext -Subscription $paramSubscriptionId | Out-Null
 $ctx = Get-AzContext
+if ($ctx.Subscription.Id -ne $paramSubscriptionId) {
+    throw "Failed to set Az context to $paramSubscriptionId (current sub is $($ctx.Subscription.Id)). Confirm your account has access to that subscription in tenant $($ctx.Tenant.Id)."
+}
 Write-Host "Tenant       : $($ctx.Tenant.Id)"
 Write-Host "Subscription : $($ctx.Subscription.Name) ($($ctx.Subscription.Id))"
 Write-Host "Account      : $($ctx.Account.Id)"
@@ -465,6 +493,24 @@ Register-AvdJobSchedule -RunbookName 'Disable-DrainForEntraJoined' -ScheduleName
     HostpoolName = $rebuildHpName
     HostpoolRG   = $rebuildHpRG
 }
+
+# ---- Hourly schedule for Disable-DrainAfterAge: bind, then DISABLE.
+# Why disabled by default: this runbook is the time-based fallback path
+# for hosts where Entra registration takes longer than the rebuild flow
+# allows. Operators usually want to invoke it manually after looking at
+# specific hosts, not on every tick. We bind it so the schedule is
+# preconfigured and ready to go, but flip isEnabled=false so it does NOT
+# fire until someone explicitly enables it in the portal or via
+# Set-AzAutomationSchedule -IsEnabled $true.
+Register-AvdJobSchedule -RunbookName 'Disable-DrainAfterAge' -ScheduleName 'sched-drainage-hourly' -Parameters @{
+    HostpoolName = $rebuildHpName
+    HostpoolRG   = $rebuildHpRG
+}
+Write-Host "Disabling schedule sched-drainage-hourly (manual-only by design)..."
+Set-AzAutomationSchedule -ResourceGroupName $ResourceGroup `
+    -AutomationAccountName $aaName `
+    -Name 'sched-drainage-hourly' `
+    -IsEnabled $false | Out-Null
 
 if ($Mode -ne 'Test') {
     Write-Host ''

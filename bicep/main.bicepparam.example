@@ -12,6 +12,13 @@
 
 using 'main.bicep'
 
+// --- Subscription guard --------------------------------------------------
+// Tenants commonly have many subscriptions; setting this here lets
+// Deploy-Automation.ps1 abort BEFORE any Az call if the live context is on
+// a different sub. The value is also written into deployment outputs so
+// every deployment record shows the sub it was approved for.
+param subscriptionId               = '<SUBSCRIPTION_ID>'
+
 // --- Azure region and Automation Account ---------------------------------
 // Must be a region your AVD hosts already live in (commercial e.g. eastus2,
 // gov e.g. usgovvirginia).
