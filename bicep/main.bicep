@@ -78,8 +78,8 @@ param tags object = {
 @description('Internal use only - leave at default. Captures deployment-time UTC to seed schedule startTime.')
 param deploymentTimeUtc string = utcNow('yyyy-MM-ddTHH:mm:ssZ')
 
-@description('Start time (UTC, ISO 8601) for the weekly Saturday rebuild kickoff. Must be in the future. Default is a known Saturday at 02:00 UTC; advancedSchedule constrains real runs to Saturdays.')
-param weeklyStartTime string = '2026-06-13T02:00:00Z'
+@description('Optional override for the weekly Saturday rebuild kickoff start time (UTC, ISO 8601). Leave empty to auto-compute the next Saturday 02:00 UTC after deployment. If set, it MUST be at least 5 minutes in the future (Azure Automation requirement).')
+param weeklyStartTime string = ''
 
 // ----------------------------------- VM-rebuilt email-alert parameters
 
@@ -232,6 +232,21 @@ var minStartBufferSeconds = 600
 var hourlyStartEpoch      = (thirtyMarkEpoch - nowEpoch) > minStartBufferSeconds ? thirtyMarkEpoch : (thirtyMarkEpoch + 3600)
 var hourlyRetryStartTime  = dateTimeFromEpoch(hourlyStartEpoch)
 
+// Compute the next Saturday 02:00 UTC strictly in the future. A hardcoded
+// startTime goes stale and, once in the past, Azure Automation rejects the
+// schedule ("start time must be at least 5 minutes after creation"). Unix
+// epoch day 0 (1970-01-01) was a Thursday, so (daysSinceEpoch % 7) gives
+// 0=Thu, 1=Fri, 2=Sat. We snap to the next Saturday, set 02:00 (7200s), and
+// roll forward a week if that instant isn't comfortably in the future.
+var daysSinceEpoch        = nowEpoch / 86400
+var saturdayDow           = 2
+var daysUntilSaturday     = ((saturdayDow - (daysSinceEpoch % 7)) + 7) % 7
+var saturdayMidnightEpoch = (daysSinceEpoch + daysUntilSaturday) * 86400
+var saturday0200Epoch     = saturdayMidnightEpoch + 7200
+var weeklyStartEpoch      = (saturday0200Epoch - nowEpoch) > minStartBufferSeconds ? saturday0200Epoch : (saturday0200Epoch + (7 * 86400))
+var weeklyEffectiveStart  = empty(weeklyStartTime) ? dateTimeFromEpoch(weeklyStartEpoch) : weeklyStartTime
+
+
 resource schedRetry 'Microsoft.Automation/automationAccounts/schedules@2023-11-01' = {
   parent: automationAccount
   name:   'sched-recreate-retry-hourly'
@@ -253,7 +268,7 @@ resource schedWeekly 'Microsoft.Automation/automationAccounts/schedules@2023-11-
   name:   'sched-recreate-weekly-sat'
   properties: {
     description: 'Weekly kickoff every Saturday 02:00 UTC. Calls the runbook with ResetCompletedState=true.'
-    startTime:   weeklyStartTime
+    startTime:   weeklyEffectiveStart
     frequency:   'Week'
     interval:    1
     timeZone:    'Etc/UTC'
